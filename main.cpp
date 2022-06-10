@@ -1,4 +1,10 @@
 #include "Classes.hpp"
+#include "Errors.hpp"
+
+static std::unique_ptr<LLVMContext> TheContext;
+static std::unique_ptr<Module> TheModule;
+static std::unique_ptr<IRBuilder<>> Builder;
+static std::map<std::string, Value *> NamedValues;
 
 enum Token
 {
@@ -11,71 +17,124 @@ enum Token
     tok_number = -5,
 };
 
-Value* NumberExprAST::codegen() {
-    return ConstantFP::get(TheContext, APFloat(Val));
+Value *NumberExprAST::codegen()
+{
+    return ConstantFP::get(*TheContext, APFloat(Val));
 }
 
-Value* VariableExprAST::codegen() {
-    Value* V = NamedValues[Name];
+Value *VariableExprAST::codegen()
+{
+    Value *V = NamedValues[Name];
 
-    if(!V)
+    if (!V)
         LogErrorV("Unknown variable name");
-    
+
     return V;
 }
 
-Value *BinaryExprAST::codegen() {
+Value *BinaryExprAST::codegen()
+{
     Value *L = LHS->codegen();
     Value *R = RHS->codegen();
-    if(!L || !R)
+    if (!L || !R)
         return nullptr;
-    
-    switch(Op) {
-        case '+':
-            return Builder.CreateFAdd(L, R, "addtmp");
-        case '-':
-            return Builder.CreateFSub(L, R, "subtmp");
-        case '*':
-            return Builder.CreateFMul(L, R, "multmp");
-        case '<':
-            L = Builder.CreateFCmpULT(L, R, "cmptmp");
-            return Builder.CreateUIToFP(L, Type::getDoubleTy(TheContext), "booltmp");
-        default:
-            return LogErrorV("invalid binary operator");
+
+    switch (Op)
+    {
+    case '+':
+        return Builder->CreateFAdd(L, R, "addtmp");
+    case '-':
+        return Builder->CreateFSub(L, R, "subtmp");
+    case '*':
+        return Builder->CreateFMul(L, R, "multmp");
+    case '<':
+        L = Builder->CreateFCmpULT(L, R, "cmptmp");
+        return Builder->CreateUIToFP(L, Type::getDoubleTy(*TheContext), "booltmp");
+    default:
+        return LogErrorV("invalid binary operator");
     }
 }
 
-
-Value *CallExprAST::codegen() {
+Value *CallExprAST::codegen()
+{
     // look up the name is the global module table.
     Function *CalleeF = TheModule->getFunction(Callee);
-    if(!CalleeF)
+    if (!CalleeF)
         return LogErrorV("Unknown function referenced");
-    
+
     // If argument mismatch error.
-    if(CalleeF->arg_size() != Args.size())
+    if (CalleeF->arg_size() != Args.size())
         return LogErrorV("Incorrect # arguments passed");
-    
+
     std::vector<Value *> ArgsV;
-    for(unsigned i = 0, e = Args.size(); i != e; ++i) {
+    for (unsigned i = 0, e = Args.size(); i != e; ++i)
+    {
         ArgsV.push_back(Args[i]->codegen());
-        if(!ArgsV.back())
+        if (!ArgsV.back())
             return nullptr;
     }
 
-    return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
+    return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
 }
 
-Function *PrototypeAST::codegen() {
+Function *PrototypeAST::codegen()
+{
     // Make the function type: double(double, double) etc.
-    std::vector<Type *> Doubles(Args.size(), 
-                                    Type::getDoubleTy(TheContext));
-    
-    FunctionType *FT =
-        FunctionType::get(Type::getDoubleTy(TheContext), Doubles, false);
+    std::vector<Type *> Doubles(Args.size(),
+                                Type::getDoubleTy(*TheContext));
 
-    Function* F = Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
-}   
+    FunctionType *FT =
+        FunctionType::get(Type::getDoubleTy(*TheContext), Doubles, false);
+
+    Function *F = Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
+
+    // Set names for all arguments
+    unsigned Idx = 0;
+    for (auto &Arg : F->args())
+    {
+        Arg.setName(Args[Idx++]);
+    }
+
+    return F;
+}
+
+Function *FunctionAST::codegen()
+{
+    // First, check for an existing function form a previous 'extern' declaration
+
+    Function *TheFunction = TheModule->getFunction(Proto->getName());
+
+    if (!TheFunction)
+        TheFunction = Proto->codegen();
+
+    if (!TheFunction)
+        return nullptr;
+
+    if (!TheFunction->empty())
+        return (Function *)LogErrorV("Function cannot be redefined.");
+
+    // Create a new basic block to start insertion into.
+    BasicBlock *BB = BasicBlock::Create(*TheContext, "entry", TheFunction);
+    Builder->SetInsertPoint(BB);
+
+    // Record the function argument in the NamedValues map.
+    NamedValues.clear();
+    for (auto &Arg : TheFunction->args())
+        NamedValues[Arg.getName().str()] = &Arg;
+
+    if (Value *RetVal = Body->codegen())
+    {
+        // Finish off the function
+        Builder->CreateRet(RetVal);
+
+        // Validate the generated code, checking for consistency
+        verifyFunction(*TheFunction);
+        return TheFunction;
+    }
+    // Error reading body, remove function.
+    TheFunction->eraseFromParent();
+    return nullptr;
+}
 
 static int gettok();
 
@@ -101,28 +160,6 @@ static int GetTokPrecedence()
     if (TokPrec <= 0)
         return -1;
     return TokPrec;
-}
-
-std::unique_ptr<ExprAST> LogError(const char *Str)
-{
-    fprintf(stderr, "LogError: %s\n", Str);
-    return nullptr;
-}
-
-std::unique_ptr<PrototypeAST> LogErrorP(const char *Str)
-{
-    LogError(Str);
-    return nullptr;
-}
-
-static LLVMContext TheContext;
-static IRBuilder<> Builder(TheContext);
-static std::unique_ptr<Module> TheModule;
-static std::map<std::string, Value *> NamedValues;
-
-Value *LogErrorV(const char* Str) {
-    LogError(Str);
-    return nullptr;
 }
 
 static std::unique_ptr<ExprAST> ParsePrimary();
@@ -292,28 +329,69 @@ static std::unique_ptr<ExprAST> ParsePrimary()
     }
 }
 
+static void InitializeModule()
+{
+    // Open a new context and module
+    TheContext = std::make_unique<LLVMContext>();
+    TheModule = std::make_unique<Module>("my cool jit", *TheContext);
+
+    // Create a new Builder for the module.
+    Builder = std::make_unique<IRBuilder<>>(*TheContext);
+}
+
 static void HandleDefinition()
 {
-    if (ParseDefinition())
-        fprintf(stderr, "Parsed a function definition\n");
+    if (auto FnAST = ParseDefinition())
+    {
+        if (auto *FnIR = FnAST->codegen())
+        {
+            fprintf(stderr, "Read function definiton:");
+            FnIR->print(errs());
+            fprintf(stderr, "\n");
+        }
+    }
     else
         getNextToken();
 }
 
 static void HandleExtern()
 {
-    if (ParseExtern())
-        fprintf(stderr, "Parsed as extern\n");
+    if (auto ProtoAST = ParseExtern())
+    {
+        if (auto *FnIR = ProtoAST->codegen())
+        {
+            fprintf(stderr, "Read extern: ");
+            FnIR->print(errs());
+            fprintf(stderr, "\n");
+        }
+    }
     else
+    {
+        // Skip token for error recovery.
         getNextToken();
+    }
 }
 
 static void HandleTopLevelExpression()
 {
-    if (ParseTopLevelExpr())
-        fprintf(stderr, "Parsed a top-level expr\n");
+    // Evaluate a top-level expression into an anonymous function.
+    if (auto FnAST = ParseTopLevelExpr())
+    {
+        if (auto *FnIR = FnAST->codegen())
+        {
+            fprintf(stderr, "Read top-level expression:");
+            FnIR->print(errs());
+            fprintf(stderr, "\n");
+
+            // Remove the anonymous expression.
+            FnIR->eraseFromParent();
+        }
+    }
     else
+    {
+        // Skip token for error recovery.
         getNextToken();
+    }
 }
 
 static void MainLoop()
@@ -410,7 +488,11 @@ int main()
     fprintf(stderr, "ready> ");
     getNextToken();
 
+    InitializeModule();
+
     MainLoop();
+
+    TheModule->print(errs(), nullptr);
 
     return 0;
 }

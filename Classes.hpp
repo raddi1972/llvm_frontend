@@ -1,4 +1,5 @@
-#pragma once
+#ifndef CLASSES
+#define CLASSES
 
 #include <llvm-14/llvm/ADT/APFloat.h>
 #include <llvm-14/llvm/ADT/STLExtras.h>
@@ -31,7 +32,7 @@ class NumberExprAST : public ExprAST
 
 public:
     NumberExprAST(double Val) : Val(Val) {}
-    Value *codegen() override {}
+    Value *codegen() override;
 };
 
 class VariableExprAST : public ExprAST
@@ -40,15 +41,16 @@ class VariableExprAST : public ExprAST
 
 public:
     VariableExprAST(const std::string &Name) : Name(Name) {}
-    Value *codegen() override {}
+    Value *codegen() override;
 };
 
-class BinaryExprAST : public ExprAST {
+class BinaryExprAST : public ExprAST
+{
     char Op;
     std::unique_ptr<ExprAST> LHS, RHS;
 
 public:
-    Value *codegen() override {}
+    Value *codegen() override;
     BinaryExprAST(char Op, std::unique_ptr<ExprAST> LHS, std::unique_ptr<ExprAST> RHS)
         : Op(Op), LHS(std::move(LHS)), RHS(std::move(RHS))
     {
@@ -61,7 +63,7 @@ class CallExprAST : public ExprAST
     std::vector<std::unique_ptr<ExprAST>> Args;
 
 public:
-    Value *codegen() override {}
+    Value *codegen() override;
     CallExprAST(const std::string &Callee, std::vector<std::unique_ptr<ExprAST>> Args)
         : Callee(Callee), Args(std::move(Args))
     {
@@ -74,7 +76,7 @@ class PrototypeAST
     std::vector<std::string> Args;
 
 public:
-    Function* codegen();
+    Function *codegen();
     PrototypeAST(const std::string &name, std::vector<std::string> Args)
         : Name(name), Args(std::move(Args))
     {
@@ -86,6 +88,8 @@ public:
 class FunctionAST
 {
 public:
+    Function *codegen();
+
     FunctionAST(std::unique_ptr<PrototypeAST> Proto,
                 std::unique_ptr<ExprAST> Body)
         : Proto(std::move(Proto)), Body(std::move(Body)) {}
@@ -94,3 +98,5 @@ private:
     std::unique_ptr<PrototypeAST> Proto;
     std::unique_ptr<ExprAST> Body;
 };
+
+#endif
